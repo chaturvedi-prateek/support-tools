@@ -4,7 +4,7 @@
  * getMongoData.js: MongoDB Config and Schema Report
  * =================================================
  *
- * Copyright MongoDB, Inc, 2015
+ * Copyright MongoDB, Inc, 2022
  *
  * Gather MongoDB configuration and schema information.
  *
@@ -56,7 +56,7 @@
  * limitations under the License.
  */
 
-var _version = "3.0.0";
+var _version = "4.0.0";
 
 (function () {
    "use strict";
@@ -145,7 +145,7 @@ function printShardInfo(){
                 if (db.partitioned) {
                     doc['collections'] = [];
                     configDB.collections.find( { _id : new RegExp( "^" +
-                        RegExp.escape(db._id) + "\\." ) } ).
+                        escapeRegex(db._id) + "\\." ) } ).
                         sort( { _id : 1 } ).forEach( function( coll ) {
                             if ( coll.dropped !== true ){
                                 collDoc = {};
@@ -198,6 +198,9 @@ function printShardInfo(){
                 ret.push(doc);
             }
         );
+        function escapeRegex(string) {
+            return string.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+        }
         return ret;
     }, section);
 
@@ -263,7 +266,7 @@ function printInfo(message, command, section, printCapture, commandParameters) {
 function printServerInfo() {
     section = "server_info";
     printInfo('Shell version',      version, section);
-    printInfo('Shell hostname',     hostname, section);
+    printInfo('Shell hostname',     os.hostname, section);
     printInfo('db',                 function(){return db.getName()}, section);
     printInfo('Server status info', function(){return db.serverStatus()}, section);
     printInfo('Host info',          function(){return db.hostInfo()}, section);
@@ -277,7 +280,8 @@ function printReplicaSetInfo() {
     printInfo('Replica set config', function(){return rs.conf()}, section);
     printInfo('Replica status',     function(){return rs.status()}, section);
     printInfo('Replica info',       function(){return db.getReplicationInfo()}, section);
-    printInfo('Replica slave info', function(){return db.printSlaveReplicationInfo()}, section, true);
+    /* printInfo('Replica slave info', function(){return db.printSlaveReplicationInfo()}, section, true); */
+    printInfo('Replica Secondary Replication info', function(){return db.printSecondaryReplicationInfo()}, section, true);
 }
 
 function printUserAuthInfo() {
@@ -301,84 +305,88 @@ function printDataInfo(isMongoS) {
 
     if (dbs.databases) {
         dbs.databases.forEach(function(mydb) {
-            var collections = printInfo("List of collections for database '"+ mydb.name +"'",
-                                        function(){
-					    var collectionNames = []
+            // removing internal databases
+            if( mydb.name != "local")   {
+                var collections = printInfo("List of collections for database '"+ mydb.name +"'",
+                                            function(){
+                            var collectionNames = []
 
-					    // Filter out views
-					    db.getSiblingDB(mydb.name).getCollectionInfos({"type": "collection"}).forEach(function(collectionInfo) {
-						collectionNames.push(collectionInfo['name']);
-					    })
+                            // Filter out views
+                            db.getSiblingDB(mydb.name).getCollectionInfos({"type": "collection"}).forEach(function(collectionInfo) {
+                            collectionNames.push(collectionInfo['name']);
+                            })
 
-					    // Filter out the collections with the "system." prefix in the system databases
-					    if (mydb.name == "config" || mydb.name == "local" || mydb.name == "admin") {
-						return collectionNames.filter(function (str) { return str.indexOf("system.") != 0; });
-					    } else {
-						return collectionNames;
-					    }
-					}, section);
+                            // Filter out the collections with the "system." prefix in the system databases
+                            /* if (mydb.name == "config" || mydb.name == "local" || mydb.name == "admin") { */
+                            return collectionNames.filter(function (str) { return str.indexOf("system.") != 0; });
+                           /*  } else {
+                            return collectionNames;
+                            } */
+                        }, section);
 
-            printInfo('Database stats (MB)',
-                      function(){return db.getSiblingDB(mydb.name).stats(1024*1024)}, section);
-            if (!isMongoS) {
-                printInfo("Database profiler for database '"+ mydb.name + "'",
-                          function(){return db.getSiblingDB(mydb.name).getProfilingStatus()}, section, false, {"db": mydb.name})
-            }
+                printInfo('Database stats (MB)',
+                        function(){return db.getSiblingDB(mydb.name).stats(1024*1024)}, section);
+                if (!isMongoS) {
+                    printInfo("Database profiler for database '"+ mydb.name + "'",
+                            function(){return db.getSiblingDB(mydb.name).getProfilingStatus()}, section, false, {"db": mydb.name})
+                }
 
-            if (collections) {
-                collections.forEach(function(col) {
-                    printInfo('Collection stats (MB)',
-                              function(){return db.getSiblingDB(mydb.name).getCollection(col).stats(1024*1024)}, section);
-                    collections_counter++;
-                    if (collections_counter > _maxCollections) {
-			var err_msg = 'Already asked for stats on '+collections_counter+' collections ' +
-                          'which is above the max allowed for this script. No more database and ' +
-                          'collection-level stats will be gathered, so the overall data is ' +
-                          'incomplete. '
-                        if (_printJSON) {
-                          err_msg += 'The "subsection" fields have been prefixed with "INCOMPLETE_" ' +
-                          'to indicate that partial data has been outputted.'
+                if (collections) {
+                    collections.forEach(function(col) {
+                        var collStats = printInfo('Collection stats (MB)',
+                                function(){return db.getSiblingDB(mydb.name).getCollection(col).stats(1024*1024)}, section);
+                        collections_counter++;
+                        if (collections_counter > _maxCollections) {
+                var err_msg = 'Already asked for stats on '+collections_counter+' collections ' +
+                            'which is above the max allowed for this script. No more database and ' +
+                            'collection-level stats will be gathered, so the overall data is ' +
+                            'incomplete. '
+                            if (_printJSON) {
+                            err_msg += 'The "subsection" fields have been prefixed with "INCOMPLETE_" ' +
+                            'to indicate that partial data has been outputted.'
+                            }
+
+                            throw {
+                            name: 'MaxCollectionsExceededException',
+                            message: err_msg
+                            }
                         }
-
-                        throw {
-                          name: 'MaxCollectionsExceededException',
-                          message: err_msg
+                        //checking if collection sharded
+                        if (isMongoS &&  collStats.sharded) {
+                            printInfo('Shard distribution',
+                                    function(){return db.getSiblingDB(mydb.name).getCollection(col).getShardDistribution()}, section, true);
                         }
-                    }
-                    if (isMongoS) {
-                        printInfo('Shard distribution',
-                                  function(){return db.getSiblingDB(mydb.name).getCollection(col).getShardDistribution()}, section, true);
-                    }
-                    printInfo('Indexes',
-                              function(){return db.getSiblingDB(mydb.name).getCollection(col).getIndexes()}, section, false, {"db": mydb.name, "collection": col});
-                    printInfo('Index Stats',
-                              function(){
-                                var res = db.getSiblingDB(mydb.name).runCommand( {
-                                  aggregate: col,
-                                  pipeline: [
-                                    {$indexStats: {}},
-                                    {$group: {_id: "$key", stats: {$push: {accesses: "$accesses.ops", host: "$host", since: "$accesses.since"}}}},
-                                    {$project: {key: "$_id", stats: 1, _id: 0}}
-                                  ],
-                                  cursor: {}
-                                });
-
-                                //It is assumed that there always will be a single batch as collections
-                                //are limited to 64 indexes and usage from all shards is grouped
-                                //into a single document
-                                if (res.hasOwnProperty('cursor') && res.cursor.hasOwnProperty('firstBatch')) {
-                                  res.cursor.firstBatch.forEach(
-                                    function(d){
-                                      d.stats.forEach(
-                                        function(d){
-                                          d.since = d.since.toUTCString();
-                                        })
+                        printInfo('Indexes',
+                                function(){return db.getSiblingDB(mydb.name).getCollection(col).getIndexes()}, section, false, {"db": mydb.name, "collection": col});
+                        printInfo('Index Stats',
+                                function(){
+                                    var res = db.getSiblingDB(mydb.name).runCommand( {
+                                    aggregate: col,
+                                    pipeline: [
+                                        {$indexStats: {}},
+                                        {$group: {_id: "$key", stats: {$push: {accesses: "$accesses.ops", host: "$host", since: "$accesses.since"}}}},
+                                        {$project: {key: "$_id", stats: 1, _id: 0}}
+                                    ],
+                                    cursor: {}
                                     });
-                                }
 
-                                return res;
-                              }, section);
-                });
+                                    //It is assumed that there always will be a single batch as collections
+                                    //are limited to 64 indexes and usage from all shards is grouped
+                                    //into a single document
+                                    if (res.hasOwnProperty('cursor') && res.cursor.hasOwnProperty('firstBatch')) {
+                                    res.cursor.firstBatch.forEach(
+                                        function(d){
+                                        d.stats.forEach(
+                                            function(d){
+                                            d.since = d.since.toUTCString();
+                                            })
+                                        });
+                                    }
+
+                                    return res;
+                                }, section);
+                    });
+                }
             }
         });
     }
@@ -387,9 +395,13 @@ function printDataInfo(isMongoS) {
 function printShardOrReplicaSetInfo() {
     section = "shard_or_replicaset_info";
     printInfo('isMaster', function(){return db.isMaster()}, section);
-    var state;
-    var stateInfo = rs.status();
-    if (stateInfo.ok) {
+    var state, stateInfo;
+    try {
+        stateInfo = rs.status();
+    } catch (exceptionVar) {
+        stateInfo = exceptionVar;
+    }
+    if ('ok' in stateInfo && stateInfo.ok) {
         stateInfo.members.forEach( function( member ) { if ( member.self ) { state = member.stateStr; } } );
         if ( !state ) state = stateInfo.myState;
     } else {
@@ -436,7 +448,7 @@ if (! _printJSON) {
     print("getMongoData.js version " + _version);
     print("================================");
 }
-var _host = hostname();
+var _host = os.hostname();
 
 try {
     printServerInfo();
@@ -446,7 +458,7 @@ try {
 } catch(e) {
     // To ensure that the operator knows there was an error, print the error
     // even when outputting JSON to make it invalid JSON.
-    print('\nERROR: '+e.message);
+    print('\nERROR: '+e);
 
     if (e.name === 'MaxCollectionsExceededException') {
       // Prefix the "subsection" fields with "INCOMPLETE_" to make
